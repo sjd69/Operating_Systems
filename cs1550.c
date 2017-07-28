@@ -93,7 +93,8 @@ static int parse_path(const char* path, char* dname, char* fname, char* fext)
 }
 
 //Originally had this function doing more, but figured it wasn't needed anymore. Seems somewhat pointless now.
-static FILE* get_directories() {
+static FILE* get_directories() 
+{
 	FILE* fp = fopen(".directories", "rb");
 	
 	/**
@@ -105,9 +106,56 @@ static FILE* get_directories() {
 	return file;
 }
 
+static int dir_exists(FILE* fp, char* dname)
+{
+	int res = 0;
+	
+	if (fp != NULL)
+	{
+		cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));		
+		int is_found = 0;
+		int read = -1;
+		while (is_found != 1 && read != 0)
+		{
+			read = fread(entry, sizeof(cs1550_directory_entry), 1, fp);
+			
+			if (strcmp(entry->dname, directory) == 0)
+			{
+				is_found = 1;
+			}
+		}
+		
+		if (is_found == 1)
+		{
+			res = 0;
+		}
+		else
+		{
+			res = -ENOENT;
+		}
+	}
+	else
+	{
+		res = -ENOENT;
+	}
+
+	return res;
+}
+
 static int find_directory()
 {
+	int res = 0;
 	
+	FILE* fp = get_directories();
+	
+	if (fp == NULL) 
+	{
+		res = -1;
+	}
+	else
+	{
+		res = fseek(fp, inde
+	}
 }
 /*
  * Called whenever the system wants to know the file attributes, including
@@ -133,14 +181,14 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 		
 		
 		//Should be 1 if a directory. > 1 if a file.
-		res = parse_path(path, dname, fname, fext);
+		int parsed = parse_path(path, dname, fname, fext);
 		
 		//If directory
-		if (res == 1)
+		if (parsed == 1)
 		{
 			
 		} 
-		else if (res > 1)
+		else if (parsed > 1)
 		{
 			FILE* fp = get_directories();
 			
@@ -153,10 +201,15 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 			{
 				printf(".directories exists");
 				
-				//Need to find the directory now.
-				int is_found = 0;
+				//Need to find the directory now if it exists
+				int exists = dir_exists(fp);
 				
-				while (is_found == 0 && fread(
+				if (exists == 0)
+				{
+					stbuf->st_mode = S_IFDIR | 0755;
+					stbuf->st_nlink = 2;
+					res = 0;
+				}
 			}
 
 			
