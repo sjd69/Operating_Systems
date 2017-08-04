@@ -89,7 +89,7 @@ static int parse_path(const char* path, char* dname, char* fname, char* fext)
 	memset(fname, 0, MAX_FILENAME + 1);
 	memset(fext, 0, MAX_EXTENSION + 1);
 	
-	return sscanf(path, "/%[^/]/%[^.].%s", dname, fname, extension);
+	return sscanf(path, "/%[^/]/%[^.].%s", dname, fname, fext);
 }
 
 //Originally had this function doing more, but figured it wasn't needed anymore. Seems somewhat pointless now.
@@ -97,13 +97,24 @@ static FILE* get_directories()
 {
 	FILE* fp = fopen(".directories", "rb");
 	
-	/**
-	if (fp == NULL) {
-		fp = fopen(".directories", "w+b");
-	} 
-	**/
+	return fp;
+}
+
+static int get_directory(FILE* fp, int index, cs1550_root_directory* dir)
+{
+	int res = 0;
 	
-	return file;
+	if (fp == NULL)
+	{
+		res = -ENOENT;
+	}
+	else
+	{
+		fseek(fp, index*sizeof(cs1550_root_directory), SEEK_SET);
+		res = fread(dir, sizeof(cs1550_root_directory), 1, fp);
+	}
+	
+	return res;
 }
 
 static int dir_exists(FILE* fp, char* dname)
@@ -112,18 +123,20 @@ static int dir_exists(FILE* fp, char* dname)
 	
 	if (fp != NULL)
 	{
-		cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));		
 		int is_found = 0;
-		int read = -1;
-		while (is_found != 1 && read != 0)
+		int index = 0;
+		
+		cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));		
+		for (get_directory(fp, index, &dir); get_directory(fp, index, &dir) == 0; index++)
 		{
-			read = fread(entry, sizeof(cs1550_directory_entry), 1, fp);
-			
-			if (strcmp(entry->dname, directory) == 0)
+			if (strcmp(dir->directories[index].dname, dname) == 0)
 			{
 				is_found = 1;
+				break;
 			}
 		}
+		
+		free(dir);
 		
 		if (is_found == 1)
 		{
@@ -142,21 +155,26 @@ static int dir_exists(FILE* fp, char* dname)
 	return res;
 }
 
-static int find_directory()
+static int get_file(cs1550_directory_entry* entry, char* fname, char* fext)
 {
-	int res = 0;
+	int file_count = 0;
 	
-	FILE* fp = get_directories();
+	for (file_count = 0; file_count < entry->nFiles; file_count++)
+	{
+		if (strcmp(fname, entry->files[file_count].fname) == 0)
+		{
+			if (strcmp(fext, entry->files[file_count].fext == 0))
+			{
+				return file_count;
+			}
+		}
+		
+	}
 	
-	if (fp == NULL) 
-	{
-		res = -1;
-	}
-	else
-	{
-		res = fseek(fp, inde
-	}
+	return -ENOENT;
+	
 }
+
 /*
  * Called whenever the system wants to know the file attributes, including
  * simply whether the file exists or not. 
@@ -182,15 +200,12 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 		
 		//Should be 1 if a directory. > 1 if a file.
 		int parsed = parse_path(path, dname, fname, fext);
+		FILE* fp = get_directories();
 		
 		//If directory
 		if (parsed == 1)
 		{
 			
-		} 
-		else if (parsed > 1)
-		{
-			FILE* fp = get_directories();
 			
 			if (fp == NULL)
 			{
@@ -202,7 +217,7 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 				printf(".directories exists");
 				
 				//Need to find the directory now if it exists
-				int exists = dir_exists(fp);
+				int exists = dir_exists(fp, dname);
 				
 				if (exists == 0)
 				{
@@ -210,11 +225,52 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 					stbuf->st_nlink = 2;
 					res = 0;
 				}
+				else
+				{
+					res = -ENOENT;
+				}
 			}
-
+	
+		} 
+		//if File
+		else if (parsed > 1)
+		{
+			int index = 0;
+			int found = 0;
+			cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory)); 
+			for (get_directory(fp, index, &dir); get_directory(fp, index, &dir) == 0; index++)
+			{
+				if (strcmp(dir->directories[index].dname, dname) == 0)
+				{
+					found = 1;
+					break;
+				}
+			}
 			
+			if (found = 0)
+			{
+				res = -ENOENT;
+			}
+			else
+			{
+				cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
+				int file_index = get_file(entry, fname, fext);
+				
+				if (file_index == -ENOENT)
+				{
+					res = -ENOENT;
+				}
+				else
+				{
+					stbuf->st_mode = S_IFREG | 0666; 
+					stbuf->st_nlink = 1; //file links
+					stbuf->st_size = entry->files[file_index].fsize; //file size - make sure you replace with real size!
+					res = 0;
+				}
+				free(entry);
+			}
 		}
-		
+		fclose(fp);
 		
 	//Check if name is subdirectory
 	/* 
@@ -232,10 +288,8 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 		stbuf->st_size = 0; //file size - make sure you replace with real size!
 		res = 0; // no error
 	*/
-
-		//Else return that path doesn't exist
-		res = -ENOENT;
 	}
+	
 	return res;
 }
 
@@ -251,15 +305,85 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	//satisfy the compiler
 	(void) offset;
 	(void) fi;
+	
+	char dname[MAX_FILENAME + 1];	//directory name (plus space for nul)
+	char fname[MAX_FILENAME + 1];	//filename (plus space for nul)
+	char fext[MAX_EXTENSION + 1];	//file extension (plus space for nul)
+	
+	//Should be 1 if a directory. > 1 if a file.
+	int parsed = parse_path(path, dname, fname, fext);
+	FILE* fp = get_directories();
+	
 
 	//This line assumes we have no subdirectories, need to change
-	if (strcmp(path, "/") != 0)
-	return -ENOENT;
-
-	//the filler function allows us to add entries to the listing
-	//read the fuse.h file for a description (in the ../include dir)
-	filler(buf, ".", NULL, 0);
-	filler(buf, "..", NULL, 0);
+	if (strcmp(path, "/") == 0)
+	{
+		//the filler function allows us to add entries to the listing
+		//read the fuse.h file for a description (in the ../include dir)
+		filler(buf, ".", NULL, 0);
+		filler(buf, "..", NULL, 0);
+		
+		if (fp != NULL)
+		{
+			cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
+			
+			int index = 0;
+			for (index = 0; index < MAX_FILES_IN_DIR; index++)
+			{
+				filler(buf, entry->files[index].fname, NULL, 0);
+			}
+			
+			free(entry);
+		}
+	}
+	else
+	{
+		if (fp != NULL)
+		{	
+			int dir_index = 0;
+			int is_found = 0;
+			cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory)); 
+			for (get_directory(fp, dir_index, &dir); get_directory(fp, dir_index, &dir) == 0; dir_index++)
+			{
+				if (strcmp(dir->directories[dir_index].dname, dname) == 0)
+				{
+					is_found = 1;
+					break;
+				}
+			}
+			
+			
+			if (is_found == 1)
+			{
+				cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
+				int index = 0;
+				for (get_directory(fp, index, &dir); get_directory(fp, index, &dir) == 0; index++)
+				{
+					for (index = 0; index < entry->nFiles; index++)
+					{
+						strcpy(fname, entry->files[index].fname);
+						strcat(fname, ".");
+						strcat(fname, entry->files[index].fext);
+						
+						filler(buf, fname, NULL, 0);
+					}
+				}
+				
+				fclose(fp);
+				free(dir);
+				free(entry);
+			}
+			else
+			{
+				fclose(fp);
+				free(dir);
+				return -ENOENT;
+			}
+		}
+	}
+	
+	
+	
 
 	/*
 	//add the user stuff (subdirs or files)
@@ -275,8 +399,57 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
  */
 static int cs1550_mkdir(const char *path, mode_t mode)
 {
-	(void) path;
+	//(void) path;
 	(void) mode;
+	
+	char dname[MAX_FILENAME + 1];	//directory name (plus space for nul)
+	char fname[MAX_FILENAME + 1];	//filename (plus space for nul)
+	char fext[MAX_EXTENSION + 1];	//file extension (plus space for nul)
+		
+		
+
+	int parsed = parse_path(path, dname, fname, fext);
+	
+	if (strlen(dname) >= 9)
+	{
+		return -ENAMETOOLONG;
+	}
+	else if (parsed > 1)
+	{
+		return -EPERM;
+	}
+	else
+	{
+		FILE* fp = fopen(".directories", "ab+");
+		
+		int exists = dir_exists(fp, dname);
+		
+		if (exists != 0)
+		{
+			int index = 0;
+			for (index = 0; index < MAX_FILES_IN_DIR; index++)
+			{
+				cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));
+				
+				if (dir->directories[index].dname == NULL)
+				{
+					strcpy(dir->directories[index].dname, dname);
+					dir->nDirectories += 1;
+					fwrite(dir, sizeof(cs1550_root_directory), 1, fp);
+					fclose(fp);
+					free(dir);
+					break;
+				}
+			}
+			
+		}
+		else
+		{
+			return -EEXIST;
+		}
+		
+	}
+	
 
 	return 0;
 }
