@@ -327,6 +327,10 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		{
 			cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
 			
+			FILE* disk = fopen(".disk", "rb+");
+			
+			fread(entry, sizeof(cs1550_directory_entry), 1, disk);
+			
 			int index = 0;
 			for (index = 0; index < MAX_FILES_IN_DIR; index++)
 			{
@@ -334,6 +338,7 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			}
 			
 			free(entry);
+			free(disk);
 		}
 	}
 	else
@@ -427,19 +432,23 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 		if (exists != 0)
 		{
 			int index = 0;
+			cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));
 			for (index = 0; index < MAX_FILES_IN_DIR; index++)
 			{
-				cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));
-				
+				fread(dir, sizeof(cs1550_root_directory), 1, fp);
 				if (dir->directories[index].dname == NULL)
 				{
+					FILE* disk = fopen(".disk", "rb+");
+					
 					strcpy(dir->directories[index].dname, dname);
 					dir->nDirectories += 1;
-					fwrite(dir, sizeof(cs1550_root_directory), 1, fp);
+					fwrite(dir, sizeof(cs1550_root_directory), 1, disk);
 					fclose(fp);
+					fclose(disk);
 					free(dir);
 					break;
 				}
+				
 			}
 			
 		}
@@ -468,9 +477,108 @@ static int cs1550_rmdir(const char *path)
  *
  */
 static int cs1550_mknod(const char *path, mode_t mode, dev_t dev)
-{
+{	
 	(void) mode;
 	(void) dev;
+	
+	char dname[MAX_FILENAME + 1];	//directory name (plus space for nul)
+	char fname[MAX_FILENAME + 1];	//filename (plus space for nul)
+	char fext[MAX_EXTENSION + 1];	//file extension (plus space for nul)
+		
+		
+
+	int parsed = parse_path(path, dname, fname, fext);
+	
+	if (parsed < 2)
+	{
+		return -EPERM;
+	}
+	else
+	{
+		if (strlen(fname) >= 9 || strlen(fext) >= 4)
+		{
+			return -ENAMETOOLONG;
+		}
+		else
+		{
+			FILE* fp = fopen(".directories", "ab+");
+			
+			if (fp == NULL)
+			{
+				return -EPERM;
+			}
+			else
+			{
+				cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));
+				int dir_index = 0;
+				int is_found = 0;
+				
+				for (get_directory(fp, dir_index, &dir); get_directory(fp, dir_index, &dir) == 0; dir_index++)
+				{
+					if (strcmp(dir->directories[dir_index].dname, dname) == 0)
+					{
+						is_found = 1;
+						break;
+					}
+				}	
+			
+				if (is_found == 1)
+				{
+					FILE* disk = fopen(".disk", "rb+");
+					
+					cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
+					fread(entry, sizeof(cs1550_directory_entry), 1, disk);
+					
+					if (get_file(entry, fname, fext) != -ENOENT)
+					{
+						free(fp);
+						free(dir);
+						free(entry);
+						return -EEXIST;
+					}
+					else
+					{
+						struct cs1550_file_directory* file = malloc(sizeof(struct cs1550_file_directory));
+						
+						strcpy(file->fname, fname);
+						
+						if (parsed == 3)
+						{
+							strcpy(file->fext, fext);
+						}
+						else
+						{
+							strcpy(file->fext, "");
+						}
+						
+						int i = 0;
+						for (i = 0; i < MAX_FILES_IN_DIR; i++)
+						{
+							if (entry->files[i].fname[0] == '\0')
+							{
+								break;
+							}
+						}
+						
+						entry->files[i] = *file;
+						entry->nFiles++;
+						
+						disk = fopen(".disk", "rb+");
+						
+						fseek(disk, i*sizeof(cs1550_root_directory), SEEK_SET);
+						fwrite(dir, sizeof(cs1550_directory_entry), 1, disk);
+						
+						fclose (fp);
+						free(dir);
+						free(entry);
+						free(file);
+						fclose(disk);
+					}
+				}
+				
+			}
+		}
+	}
 	return 0;
 }
 
@@ -502,6 +610,114 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 	//read in data
 	//set size and return, or error
 
+	if (size <= 0)
+	{
+		return -1;
+	}
+	char dname[MAX_FILENAME + 1];	//directory name (plus space for nul)
+	char fname[MAX_FILENAME + 1];	//filename (plus space for nul)
+	char fext[MAX_EXTENSION + 1];	//file extension (plus space for nul)
+		
+		
+
+	int parsed = parse_path(path, dname, fname, fext);
+	
+	//if directory
+	if (parsed < 2)
+	{
+		return -EISDIR;
+	}
+	else
+	{
+		int is_found = 0;
+		FILE* fp = get_directories();
+		cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));
+		int dir_index = 0;
+		
+		for (get_directory(fp, dir_index, &dir); get_directory(fp, dir_index, &dir) == 0; dir_index++)
+		{
+			if (strcmp(dir->directories[dir_index].dname, dname) == 0)
+			{
+				is_found = 1;
+				break;
+			}
+		}
+		int res = 0;
+		if (is_found == 1)
+		{
+			cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
+			FILE* disk = fopen(".disk", "rb+");
+			
+			fseek(disk, dir->directories[dir_index].nStartBlock*BLOCK_SIZE, SEEK_SET);
+			res = fread(entry, sizeof(cs1550_directory_entry), 1, disk);
+		
+			int file_loc = get_file(entry, fname, fext);
+			
+			if (file_loc == -ENOENT)
+			{
+				return file_loc;
+			}
+			else
+			{
+				long block = entry->files[file_loc].nStartBlock;
+				long fsize = entry->files[file_loc].fsize;
+				
+				if (offset > fsize)
+				{
+					return -EFBIG;
+				}
+				
+				cs1550_disk_block* db = malloc(sizeof(cs1550_disk_block));
+				int num_offset_blocks = offset / MAX_DATA_IN_BLOCK;
+				
+				fseek(disk, block*BLOCK_SIZE, SEEK_SET);
+				res = fread(db, sizeof(cs1550_disk_block), 1, disk);
+
+				int i = 0;
+				for (i = 0; i < num_offset_blocks; i++)
+				{
+					block = db->nNextBlock;
+					
+					fseek(disk, block*BLOCK_SIZE, SEEK_SET);
+					res = fread(db, sizeof(cs1550_disk_block), 1, disk);
+				}
+				
+				int ret = 0;
+				int bytes = offset % MAX_DATA_IN_BLOCK;
+				
+				for (ret = 0; ret < size; ret++)
+				{
+					if ((ret + bytes) % MAX_DATA_IN_BLOCK == 0 && ret > 0)
+					{
+						block = db->nNextBlock;
+						fseek(disk, block*BLOCK_SIZE, SEEK_SET);
+						fread(db, sizeof(cs1550_disk_block), 1, disk);
+					}
+					else if (ret + offset > fsize)
+					{
+						break;
+					}
+					
+					buf[ret] = db->data[(ret + bytes) % MAX_DATA_IN_BLOCK];
+				}
+				
+				fclose(fp);
+				fclose(disk);
+				free(db);
+				free(entry);
+				free(dir);
+				return ret;
+				
+			}
+		}
+		else
+		{
+			fclose(fp);
+			free(dir);
+			return -ENOENT;
+		}
+
+	}
 	size = 0;
 
 	return size;
@@ -525,6 +741,120 @@ static int cs1550_write(const char *path, const char *buf, size_t size,
 	//write data
 	//set size (should be same as input) and return, or error
 
+	if (size <= 0)
+	{
+		return -1;
+	}
+	char dname[MAX_FILENAME + 1];	//directory name (plus space for nul)
+	char fname[MAX_FILENAME + 1];	//filename (plus space for nul)
+	char fext[MAX_EXTENSION + 1];	//file extension (plus space for nul)
+		
+		
+
+	int parsed = parse_path(path, dname, fname, fext);
+	
+	//if directory
+	if (parsed < 2)	
+	{
+		return -EISDIR;
+	}
+	else
+	{
+		int is_found = 0;
+		FILE* fp = get_directories();
+		cs1550_root_directory* dir = malloc(sizeof(cs1550_root_directory));
+		int dir_index = 0;
+		
+		for (get_directory(fp, dir_index, &dir); get_directory(fp, dir_index, &dir) == 0; dir_index++)
+		{
+			if (strcmp(dir->directories[dir_index].dname, dname) == 0)
+			{
+				is_found = 1;
+				break;
+			}
+		}
+		
+		int res = 0;
+		if (is_found == 1)
+		{
+			cs1550_directory_entry* entry = malloc(sizeof(cs1550_directory_entry));
+			FILE* disk = fopen(".disk", "rb+");
+			
+			fseek(disk, dir->directories[dir_index].nStartBlock*BLOCK_SIZE, SEEK_SET);
+			res = fread(entry, sizeof(cs1550_directory_entry), 1, disk);
+		
+			int file_loc = get_file(entry, fname, fext);
+			
+			if (file_loc == -ENOENT)
+			{
+				return file_loc;
+			}
+			else
+			{
+				long block = entry->files[file_loc].nStartBlock;
+				long fsize = entry->files[file_loc].fsize;
+				
+				if (offset > fsize)
+				{
+					return -EFBIG;
+				}
+				
+				cs1550_disk_block* db = malloc(sizeof(cs1550_disk_block));
+				int num_offset_blocks = offset / MAX_DATA_IN_BLOCK;
+				
+				fseek(disk, block*BLOCK_SIZE, SEEK_SET);
+				res = fread(db, sizeof(cs1550_disk_block), 1, disk);
+
+				int i = 0;
+				for (i = 0; i < num_offset_blocks; i++)
+				{
+					block = db->nNextBlock;
+					
+					fseek(disk, block*BLOCK_SIZE, SEEK_SET);
+					res = fread(db, sizeof(cs1550_disk_block), 1, disk);
+				}
+				
+				int ret = 0;
+				int bytes = offset % MAX_DATA_IN_BLOCK;
+				
+				for (ret = 0; ret < size; ret++)
+				{
+					while ((ret + bytes) % MAX_DATA_IN_BLOCK != 0 || ret == 0)
+					{
+						db->data[(ret + bytes) % MAX_DATA_IN_BLOCK] = buf[ret];
+						ret++;
+						
+						if (ret > size)
+						{
+							break;
+						}
+					}
+					
+					fseek(disk, block*BLOCK_SIZE, SEEK_SET);
+					fwrite(db, sizeof(cs1550_disk_block), 1, disk);
+					block = db->nNextBlock;
+					fread(db, sizeof(cs1550_disk_block), 1, disk);
+					
+				}
+				
+				
+				fclose(fp);
+				fclose(disk);
+				free(db);
+				free(entry);
+				free(dir);
+				return size;
+				
+			}
+		}
+		else
+		{
+			fclose(fp);
+			free(dir);
+			return -ENOENT;
+		}
+	}
+	
 	return size;
 }
 
@@ -609,3 +939,4 @@ int main(int argc, char *argv[])
 {
 	return fuse_main(argc, argv, &hello_oper, NULL);
 }
+	
